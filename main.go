@@ -16,10 +16,11 @@ import (
 )
 
 type Poll struct {
-	Title     string
-	Options   []string
-	Votes     map[string]string
-	CreatorID string
+	Title      string
+	Options    []string
+	Votes      map[string][]string
+	MaxChoices int
+	CreatorID  string
 }
 
 var (
@@ -31,7 +32,7 @@ var (
 		},
 		{
 			Name:        "create-poll",
-			Description: "匿名投票を作成します。",
+			Description: "匿名投票を作成します（単一・複数選択対応）。",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Name:        "title",
@@ -50,6 +51,19 @@ var (
 					Description: "選択肢2を入力",
 					Required:    true,
 					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "max-choices",
+					Description: "最大何個まで選択できるか（デフォルト: 1）",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "1つだけ (単一選択)", Value: 1},
+						{Name: "最大 2 個まで", Value: 2},
+						{Name: "最大 3 個まで", Value: 3},
+						{Name: "最大 4 個まで", Value: 4},
+						{Name: "最大 5 個まで", Value: 5},
+					},
 				},
 				{
 					Name:        "option3",
@@ -93,10 +107,12 @@ func main() {
 
 	session.Identify.Intents = discordgo.IntentsGuilds
 
-	saveData, err := os.Open("saves/polls.json")
-	saveJsonData, err := io.ReadAll(saveData)
-	json.Unmarshal(saveJsonData, &polls)
-	log.Print("セーブデータをロードしました。")
+	if saveData, err := os.Open("saves/polls.json"); err == nil {
+		saveJsonData, _ := io.ReadAll(saveData)
+		json.Unmarshal(saveJsonData, &polls)
+		saveData.Close()
+		log.Print("セーブデータをロードしました。")
+	}
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Print("起動しました。")
@@ -125,7 +141,7 @@ func main() {
 								Fields: []*discordgo.MessageEmbedField{
 									{
 										Name:  "匿名投票の作り方",
-										Value: "/create-poll でタイトルと選択肢を入力して作成します。",
+										Value: "/create-poll でタイトルと選択肢を入力して作成します。\n`max-choices` を指定すれば複数投票も可能です。",
 									},
 									{
 										Name:  "匿名投票の終了方法",
@@ -139,16 +155,25 @@ func main() {
 				})
 
 			case "create-poll":
-				optionsMap := make(map[string]string)
+				optionsMap := make(map[string]interface{})
 				for _, opt := range i.ApplicationCommandData().Options {
-					optionsMap[opt.Name] = opt.StringValue()
+					if opt.Type == discordgo.ApplicationCommandOptionInteger {
+						optionsMap[opt.Name] = opt.IntValue()
+					} else {
+						optionsMap[opt.Name] = opt.StringValue()
+					}
 				}
 
-				title := optionsMap["title"]
+				title, _ := optionsMap["title"].(string)
+
+				maxChoices := 1
+				if val, ok := optionsMap["max-choices"].(int64); ok {
+					maxChoices = int(val)
+				}
 
 				var options []string
-				for i := 1; i <= 5; i++ {
-					if optVal, ok := optionsMap[fmt.Sprintf("option%d", i)]; ok && optVal != "" {
+				for idx := 1; idx <= 5; idx++ {
+					if optVal, ok := optionsMap[fmt.Sprintf("option%d", idx)].(string); ok && optVal != "" {
 						options = append(options, optVal)
 					}
 				}
@@ -160,7 +185,8 @@ func main() {
 					},
 				})
 
-				embed := renderPollEmbed(title, options, nil, false)
+				dummyVotes := make(map[string][]string)
+				embed := renderPollEmbed(title, options, dummyVotes, maxChoices, false)
 				components := renderPollComponents(options, false)
 
 				pollMessage, err := s.ChannelMessageSendComplex(i.ChannelID, &discordgo.MessageSend{
@@ -173,10 +199,11 @@ func main() {
 				}
 
 				polls[pollMessage.ID] = &Poll{
-					Title:     title,
-					Options:   options,
-					Votes:     make(map[string]string),
-					CreatorID: i.Member.User.ID,
+					Title:      title,
+					Options:    options,
+					Votes:      make(map[string][]string),
+					MaxChoices: maxChoices,
+					CreatorID:  i.Member.User.ID,
 				}
 
 				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
@@ -219,7 +246,7 @@ func main() {
 					return
 				}
 
-				finalEmbed := renderPollEmbed(poll.Title, poll.Options, poll.Votes, true)
+				finalEmbed := renderPollEmbed(poll.Title, poll.Options, poll.Votes, poll.MaxChoices, true)
 				disabledComponents := renderPollComponents(poll.Options, true)
 
 				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -232,9 +259,11 @@ func main() {
 
 				counts := make(map[string]int)
 				totalVotes := 0
-				for _, optIdx := range poll.Votes {
-					counts[optIdx]++
-					totalVotes++
+				for _, userVotes := range poll.Votes {
+					for _, optIdx := range userVotes {
+						counts[optIdx]++
+						totalVotes++
+					}
 				}
 
 				maxVotes := 0
@@ -254,8 +283,8 @@ func main() {
 				winnerText := "なし（投票がありませんでした）"
 				if len(winnerIndices) > 0 {
 					winnerText = ""
-					for i, wIdx := range winnerIndices {
-						if i > 0 {
+					for idx, wIdx := range winnerIndices {
+						if idx > 0 {
 							winnerText += ", "
 						}
 						winnerText += fmt.Sprintf("「%s」", poll.Options[wIdx])
@@ -265,7 +294,7 @@ func main() {
 
 				_, replyErr := s.ChannelMessageSendEmbedReply(i.ChannelID, &discordgo.MessageEmbed{
 					Title:       "📊 集計結果",
-					Description: fmt.Sprintf("最終結果: 総投票数 %d 票\n🏆 **結果: %s**", totalVotes, winnerText),
+					Description: fmt.Sprintf("最終結果: 総得票数 %d 票\n🏆 **結果: %s**", totalVotes, winnerText),
 					Color:       10066329,
 				}, i.Message.Reference())
 
@@ -277,13 +306,29 @@ func main() {
 				return
 			}
 
-			if currentVote, ok := poll.Votes[userID]; ok && currentVote == customID {
-				delete(poll.Votes, userID)
-			} else {
-				poll.Votes[userID] = customID
+			currentVotes := poll.Votes[userID]
+			foundIdx := -1
+			for idx, v := range currentVotes {
+				if v == customID {
+					foundIdx = idx
+					break
+				}
 			}
 
-			updatedEmbed := renderPollEmbed(poll.Title, poll.Options, poll.Votes, false)
+			if foundIdx != -1 {
+				poll.Votes[userID] = append(currentVotes[:foundIdx], currentVotes[foundIdx+1:]...)
+			} else {
+				if poll.MaxChoices <= 0 {
+					poll.MaxChoices = 1
+				}
+
+				if len(currentVotes) >= poll.MaxChoices {
+					currentVotes = currentVotes[1:]
+				}
+				poll.Votes[userID] = append(currentVotes, customID)
+			}
+
+			updatedEmbed := renderPollEmbed(poll.Title, poll.Options, poll.Votes, poll.MaxChoices, false)
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseUpdateMessage,
 				Data: &discordgo.InteractionResponseData{
@@ -319,12 +364,14 @@ func onClose() {
 	session.Close()
 }
 
-func renderPollEmbed(title string, options []string, votes map[string]string, isEnded bool) *discordgo.MessageEmbed {
+func renderPollEmbed(title string, options []string, votes map[string][]string, maxChoices int, isEnded bool) *discordgo.MessageEmbed {
 	counts := make(map[string]int)
 	totalVotes := 0
-	for _, optIdx := range votes {
-		counts[optIdx]++
-		totalVotes++
+	for _, userVotes := range votes {
+		for _, optIdx := range userVotes {
+			counts[optIdx]++
+			totalVotes++
+		}
 	}
 
 	var fields []*discordgo.MessageEmbedField
@@ -357,13 +404,19 @@ func renderPollEmbed(title string, options []string, votes map[string]string, is
 	}
 
 	embedTitle := "📊 " + title
-	description := fmt.Sprintf("総投票数: %d 票", totalVotes)
+
+	typeText := "単一選択"
+	if maxChoices > 1 {
+		typeText = fmt.Sprintf("複数選択: 最大 %d 個まで", maxChoices)
+	}
+
+	description := fmt.Sprintf("投票形式: **%s**\n総得票数: %d 票", typeText, totalVotes)
 	footerText := "ボタンを押して投票 / 同じボタンで投票取消"
 	color := 4712039
 
 	if isEnded {
 		embedTitle = "🔒 [投票終了] " + title
-		description = fmt.Sprintf("最終結果: 総投票数 %d 票\n*(この投票は締め切られました)*", totalVotes)
+		description = fmt.Sprintf("最終結果: 総得票数 %d 票\n*(この投票は締め切られました)*", totalVotes)
 		footerText = "この投票は終了しました"
 		color = 10066329
 	}
