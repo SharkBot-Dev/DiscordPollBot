@@ -127,6 +127,10 @@ func main() {
 										Name:  "匿名投票の作り方",
 										Value: "/create-poll でタイトルと選択肢を入力して作成します。",
 									},
+									{
+										Name:  "匿名投票の終了方法",
+										Value: "「投票を終了する」ボタンで投票を終了できます。",
+									},
 								},
 							},
 						},
@@ -178,8 +182,9 @@ func main() {
 				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 					Embeds: &[]*discordgo.MessageEmbed{
 						{
-							Title: "投票を作成しました。",
-							Color: 4712039,
+							Title:       "投票を作成しました。",
+							Description: "「投票を終了する」ボタンで投票を終了できます。",
+							Color:       4712039,
 						},
 					},
 				})
@@ -224,6 +229,49 @@ func main() {
 						Components: disabledComponents,
 					},
 				})
+
+				counts := make(map[string]int)
+				totalVotes := 0
+				for _, optIdx := range poll.Votes {
+					counts[optIdx]++
+					totalVotes++
+				}
+
+				maxVotes := 0
+				var winnerIndices []int
+				if totalVotes > 0 {
+					for idx := range poll.Options {
+						count := counts[fmt.Sprintf("%d", idx)]
+						if count > maxVotes {
+							maxVotes = count
+							winnerIndices = []int{idx}
+						} else if count == maxVotes && count > 0 {
+							winnerIndices = append(winnerIndices, idx)
+						}
+					}
+				}
+
+				winnerText := "なし（投票がありませんでした）"
+				if len(winnerIndices) > 0 {
+					winnerText = ""
+					for i, wIdx := range winnerIndices {
+						if i > 0 {
+							winnerText += ", "
+						}
+						winnerText += fmt.Sprintf("「%s」", poll.Options[wIdx])
+					}
+					winnerText += fmt.Sprintf(" (%d 票)", maxVotes)
+				}
+
+				_, replyErr := s.ChannelMessageSendEmbedReply(i.ChannelID, &discordgo.MessageEmbed{
+					Title:       "📊 集計結果",
+					Description: fmt.Sprintf("最終結果: 総投票数 %d 票\n🏆 **結果: %s**", totalVotes, winnerText),
+					Color:       10066329,
+				}, i.Message.Reference())
+
+				if replyErr != nil {
+					log.Print("集計エラー: ", replyErr)
+				}
 
 				delete(polls, msgID)
 				return
@@ -309,7 +357,7 @@ func renderPollEmbed(title string, options []string, votes map[string]string, is
 	}
 
 	embedTitle := "📊 " + title
-	description := fmt.Sprintf("総投票数: %d 票\n*(誰がどこに投票したかは非公開です)*", totalVotes)
+	description := fmt.Sprintf("総投票数: %d 票", totalVotes)
 	footerText := "ボタンを押して投票 / 同じボタンで投票取消"
 	color := 4712039
 
