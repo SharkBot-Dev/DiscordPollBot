@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -122,6 +123,13 @@ func main() {
 				log.Printf("コマンド同期エラー: %v", err)
 			}
 			log.Print("スラッシュコマンドを同期しました。")
+		}()
+
+		go func() {
+			for {
+				s.UpdateCustomStatus(strconv.Itoa(len(s.State.Guilds)) + "サーバー")
+				time.Sleep(10 * time.Second)
+			}
 		}()
 	})
 
