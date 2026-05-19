@@ -1,0 +1,372 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/SharkBot-Dev/DiscordPollBot/lib"
+	"github.com/bwmarrin/discordgo"
+	"github.com/joho/godotenv"
+)
+
+type Poll struct {
+	Title     string
+	Options   []string
+	Votes     map[string]string
+	CreatorID string
+}
+
+var (
+	session  *discordgo.Session
+	commands = []*discordgo.ApplicationCommand{
+		{
+			Name:        "help",
+			Description: "Botの使い方を知ります",
+		},
+		{
+			Name:        "create-poll",
+			Description: "匿名投票を作成します。",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name:        "title",
+					Description: "投票のタイトル",
+					Required:    true,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option1",
+					Description: "選択肢1を入力",
+					Required:    true,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option2",
+					Description: "選択肢2を入力",
+					Required:    true,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option3",
+					Description: "選択肢3を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option4",
+					Description: "選択肢4を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option5",
+					Description: "選択肢5を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+			},
+		},
+	}
+	startTime time.Time
+
+	polls = make(map[string]*Poll)
+)
+
+func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Error loading .env file, mapping to env variables directly")
+	}
+
+	token := os.Getenv("DISCORD_TOKEN")
+	if token == "" {
+		log.Fatal("環境変数 DISCORD_TOKEN が設定されていません")
+	}
+
+	sessionManager := &lib.DiscordSessionManager{}
+	session = sessionManager.InitializeSession(token)
+
+	session.Identify.Intents = discordgo.IntentsGuilds
+
+	saveData, err := os.Open("saves/polls.json")
+	saveJsonData, err := io.ReadAll(saveData)
+	json.Unmarshal(saveJsonData, &polls)
+	log.Print("セーブデータをロードしました。")
+
+	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		log.Print("起動しました。")
+		go func() {
+			_, err := s.ApplicationCommandBulkOverwrite(s.State.Application.ID, "", commands)
+			if err != nil {
+				log.Printf("コマンド同期エラー: %v", err)
+			}
+			log.Print("スラッシュコマンドを同期しました。")
+		}()
+	})
+
+	session.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		switch i.Type {
+		case discordgo.InteractionApplicationCommand:
+			commandName := i.ApplicationCommandData().Name
+			switch commandName {
+			case "help":
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Embeds: []*discordgo.MessageEmbed{
+							{
+								Title: "匿名投票Botの使い方",
+								Color: 4712039,
+								Fields: []*discordgo.MessageEmbedField{
+									{
+										Name:  "匿名投票の作り方",
+										Value: "/create-poll でタイトルと選択肢を入力して作成します。",
+									},
+								},
+							},
+						},
+						Flags: discordgo.MessageFlagsEphemeral,
+					},
+				})
+
+			case "create-poll":
+				optionsMap := make(map[string]string)
+				for _, opt := range i.ApplicationCommandData().Options {
+					optionsMap[opt.Name] = opt.StringValue()
+				}
+
+				title := optionsMap["title"]
+
+				var options []string
+				for i := 1; i <= 5; i++ {
+					if optVal, ok := optionsMap[fmt.Sprintf("option%d", i)]; ok && optVal != "" {
+						options = append(options, optVal)
+					}
+				}
+
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Flags: discordgo.MessageFlagsEphemeral,
+					},
+				})
+
+				embed := renderPollEmbed(title, options, nil, false)
+				components := renderPollComponents(options, false)
+
+				pollMessage, err := s.ChannelMessageSendComplex(i.ChannelID, &discordgo.MessageSend{
+					Embeds:     []*discordgo.MessageEmbed{embed},
+					Components: components,
+				})
+				if err != nil {
+					log.Printf("投票メッセージ送信エラー: %v", err)
+					return
+				}
+
+				polls[pollMessage.ID] = &Poll{
+					Title:     title,
+					Options:   options,
+					Votes:     make(map[string]string),
+					CreatorID: i.Member.User.ID,
+				}
+
+				s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Embeds: &[]*discordgo.MessageEmbed{
+						{
+							Title: "投票を作成しました。",
+							Color: 4712039,
+						},
+					},
+				})
+			}
+
+		case discordgo.InteractionMessageComponent:
+			msgID := i.Message.ID
+			poll, exists := polls[msgID]
+			if !exists {
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "エラー: この投票データは見つかりません（Botが再起動した可能性があります）。",
+						Flags:   discordgo.MessageFlagsEphemeral,
+					},
+				})
+				return
+			}
+
+			customID := i.MessageComponentData().CustomID
+			userID := i.Member.User.ID
+
+			if customID == "end_poll" {
+				if userID != poll.CreatorID {
+					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: "投票を終了できるのは、この投票の作成者だけです。",
+							Flags:   discordgo.MessageFlagsEphemeral,
+						},
+					})
+					return
+				}
+
+				finalEmbed := renderPollEmbed(poll.Title, poll.Options, poll.Votes, true)
+				disabledComponents := renderPollComponents(poll.Options, true)
+
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseUpdateMessage,
+					Data: &discordgo.InteractionResponseData{
+						Embeds:     []*discordgo.MessageEmbed{finalEmbed},
+						Components: disabledComponents,
+					},
+				})
+
+				delete(polls, msgID)
+				return
+			}
+
+			if currentVote, ok := poll.Votes[userID]; ok && currentVote == customID {
+				delete(poll.Votes, userID)
+			} else {
+				poll.Votes[userID] = customID
+			}
+
+			updatedEmbed := renderPollEmbed(poll.Title, poll.Options, poll.Votes, false)
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseUpdateMessage,
+				Data: &discordgo.InteractionResponseData{
+					Embeds:     []*discordgo.MessageEmbed{updatedEmbed},
+					Components: i.Message.Components,
+				},
+			})
+		}
+	})
+
+	if err := session.Open(); err != nil {
+		log.Fatalf("Discordセッションのオープンに失敗: %v", err)
+	}
+
+	startTime = time.Now()
+	defer onClose()
+
+	log.Println("ボットが起動しました。Ctrl+Cで終了します。")
+	waitForExitSignal()
+}
+
+func onClose() {
+	saveData, saveDataErr := json.Marshal(polls)
+	if saveDataErr != nil {
+		log.Fatalf("セーブデータ解析に失敗しました: %v", saveDataErr)
+	}
+	SaveErr := os.WriteFile("saves/polls.json", saveData, 0644)
+	if SaveErr != nil {
+		log.Fatalf("セーブに失敗しました: %v", SaveErr)
+	}
+	fmt.Println("セーブが完了しました。")
+
+	session.Close()
+}
+
+func renderPollEmbed(title string, options []string, votes map[string]string, isEnded bool) *discordgo.MessageEmbed {
+	counts := make(map[string]int)
+	totalVotes := 0
+	for _, optIdx := range votes {
+		counts[optIdx]++
+		totalVotes++
+	}
+
+	var fields []*discordgo.MessageEmbedField
+	for idx, opt := range options {
+		count := counts[fmt.Sprintf("%d", idx)]
+		percentage := 0.0
+		if totalVotes > 0 {
+			percentage = (float64(count) / float64(totalVotes)) * 100
+		}
+
+		barLength := 10
+		filledLength := 0
+		if totalVotes > 0 {
+			filledLength = int((float64(count) / float64(totalVotes)) * float64(barLength))
+		}
+		bar := ""
+		for i := 0; i < barLength; i++ {
+			if i < filledLength {
+				bar += "█"
+			} else {
+				bar += "░"
+			}
+		}
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   fmt.Sprintf("%d. %s", idx+1, opt),
+			Value:  fmt.Sprintf("%s %d 票 (%.1f%%)", bar, count, percentage),
+			Inline: false,
+		})
+	}
+
+	embedTitle := "📊 " + title
+	description := fmt.Sprintf("総投票数: %d 票\n*(誰がどこに投票したかは非公開です)*", totalVotes)
+	footerText := "ボタンを押して投票 / 同じボタンで投票取消"
+	color := 4712039
+
+	if isEnded {
+		embedTitle = "🔒 [投票終了] " + title
+		description = fmt.Sprintf("最終結果: 総投票数 %d 票\n*(この投票は締め切られました)*", totalVotes)
+		footerText = "この投票は終了しました"
+		color = 10066329
+	}
+
+	return &discordgo.MessageEmbed{
+		Title:       embedTitle,
+		Description: description,
+		Color:       color,
+		Fields:      fields,
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: footerText,
+		},
+	}
+}
+
+func renderPollComponents(options []string, isEnded bool) []discordgo.MessageComponent {
+	var voteButtons []discordgo.MessageComponent
+
+	for idx, opt := range options {
+		label := fmt.Sprintf("%d. %s", idx+1, opt)
+		if len(label) > 50 {
+			label = label[:47] + "..."
+		}
+
+		voteButtons = append(voteButtons, discordgo.Button{
+			Label:    label,
+			Style:    discordgo.PrimaryButton,
+			CustomID: fmt.Sprintf("%d", idx),
+			Disabled: isEnded,
+		})
+	}
+
+	endButton := discordgo.Button{
+		Label:    "投票を終了する",
+		Style:    discordgo.DangerButton,
+		CustomID: "end_poll",
+		Disabled: isEnded,
+	}
+
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: voteButtons,
+		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{endButton},
+		},
+	}
+}
+
+func waitForExitSignal() {
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+	<-sc
+}
