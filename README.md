@@ -1,0 +1,2 @@
+# DiscordPollBot
+投票の回答を匿名にできるDiscord投票Bot
