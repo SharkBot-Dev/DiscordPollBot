@@ -433,9 +433,9 @@ func renderPollEmbed(title string, options []string, votes map[string][]string, 
 		bar := ""
 		for i := 0; i < barLength; i++ {
 			if i < filledLength {
-				bar += "█"
+				bar += "◻️"
 			} else {
-				bar += "░"
+				bar += "◼️"
 			}
 		}
 
@@ -476,6 +476,7 @@ func renderPollEmbed(title string, options []string, votes map[string][]string, 
 }
 
 func renderPollComponents(options []string, isEnded bool) []discordgo.MessageComponent {
+	var components []discordgo.MessageComponent
 	var voteButtons []discordgo.MessageComponent
 
 	for idx, opt := range options {
@@ -490,23 +491,33 @@ func renderPollComponents(options []string, isEnded bool) []discordgo.MessageCom
 			CustomID: fmt.Sprintf("%d", idx),
 			Disabled: isEnded,
 		})
+
+		if len(voteButtons) == 5 {
+			components = append(components, discordgo.ActionsRow{
+				Components: voteButtons,
+			})
+			voteButtons = nil
+		}
 	}
 
-	endButton := discordgo.Button{
-		Label:    "投票を終了する",
-		Style:    discordgo.DangerButton,
-		CustomID: "end_poll",
-		Disabled: isEnded,
-	}
-
-	return []discordgo.MessageComponent{
-		discordgo.ActionsRow{
+	if len(voteButtons) > 0 {
+		components = append(components, discordgo.ActionsRow{
 			Components: voteButtons,
-		},
-		discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{endButton},
-		},
+		})
 	}
+
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    "投票を終了する",
+				Style:    discordgo.DangerButton,
+				CustomID: "end_poll",
+				Disabled: isEnded,
+			},
+		},
+	})
+
+	return components
 }
 
 func waitForExitSignal() {
