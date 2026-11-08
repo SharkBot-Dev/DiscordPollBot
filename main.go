@@ -64,6 +64,11 @@ var (
 						{Name: "最大 3 個まで", Value: 3},
 						{Name: "最大 4 個まで", Value: 4},
 						{Name: "最大 5 個まで", Value: 5},
+						{Name: "最大 6 個まで", Value: 6},
+						{Name: "最大 7 個まで", Value: 7},
+						{Name: "最大 8 個まで", Value: 8},
+						{Name: "最大 9 個まで", Value: 9},
+						{Name: "最大 10 個まで", Value: 10},
 					},
 				},
 				{
@@ -81,6 +86,36 @@ var (
 				{
 					Name:        "option5",
 					Description: "選択肢5を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option6",
+					Description: "選択肢6を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option7",
+					Description: "選択肢7を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option8",
+					Description: "選択肢8を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option9",
+					Description: "選択肢9を入力",
+					Required:    false,
+					Type:        discordgo.ApplicationCommandOptionString,
+				},
+				{
+					Name:        "option10",
+					Description: "選択肢10を入力",
 					Required:    false,
 					Type:        discordgo.ApplicationCommandOptionString,
 				},
@@ -180,7 +215,7 @@ func main() {
 				}
 
 				var options []string
-				for idx := 1; idx <= 5; idx++ {
+				for idx := 1; idx <= 10; idx++ {
 					if optVal, ok := optionsMap[fmt.Sprintf("option%d", idx)].(string); ok && optVal != "" {
 						options = append(options, optVal)
 					}
